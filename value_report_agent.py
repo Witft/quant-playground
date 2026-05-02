@@ -16,7 +16,7 @@ def ask_minimax(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "abab6.5s-chat",
+        "model": "MiniMax-M2.5",  # 更新为最新的官方模型名称
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1 # 我们需要理性的分析，而不是随机的创造
     }
@@ -84,12 +84,12 @@ def generate_investment_report(stock_data):
 3. **财务与估值诊断**：结合格雷厄姆数字、PE和债务情况，判断当前估值是高估、合理还是低估？负债是否健康？
 4. **价值投资者行动建议**：(坚决回避 / 放入观察池 / 具备安全边际可买入)
 """
-    print(f"正在让 MiniMax 模型分析 {stock_data['symbol']}...")
+    print(f"正在让 MiniMax-M2.5 模型分析 {stock_data['symbol']}...")
     report = ask_minimax(prompt)
     return report
 
 if __name__ == "__main__":
-    # 以花旗银行(C)为例，刚才我们发现它的价格低于格雷厄姆数字
+    # 我们测试刚才被发现有低估潜力的花旗银行 (C)
     stock = get_stock_context('C')
     report = generate_investment_report(stock)
     
