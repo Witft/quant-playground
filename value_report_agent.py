@@ -16,7 +16,7 @@ def ask_minimax(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "MiniMax-M2.5",  # 更新为最新的官方模型名称
+        "model": "MiniMax-M2.7",  # 更新为最新的官方模型名称
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1 # 我们需要理性的分析，而不是随机的创造
     }
