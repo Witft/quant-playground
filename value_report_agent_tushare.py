@@ -18,7 +18,7 @@ if not MINIMAX_API_KEY:
     raise ValueError("请在环境变量中设置 MINIMAX_CN_API_KEY")
 
 # Tushare Token (如果没有在 .env 配置，则使用一个免费的公共测试 Token)
-TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "7311ce833bf688229b46e379373d4dfbf33d6118d05dd362dbbe7954")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN")
 ts.set_token(TUSHARE_TOKEN)
 pro = ts.pro_api()
 
