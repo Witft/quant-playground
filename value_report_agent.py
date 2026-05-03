@@ -98,7 +98,7 @@ def generate_investment_report(stock_data):
 
 if __name__ == "__main__":
     # 我们测试刚才被发现有低估潜力的花旗银行 (C)
-    stock = get_stock_context('C')
+    stock = get_stock_context('600519.SS')
     report = generate_investment_report(stock)
     
     print("="*60)
