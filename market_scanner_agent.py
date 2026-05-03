@@ -1,4 +1,12 @@
 import os
+import os
+
+# 强制忽略系统代理，防止 AkShare 访问国内数据源时被代理拦截
+os.environ['HTTP_PROXY'] = ''
+os.environ['HTTPS_PROXY'] = ''
+os.environ['http_proxy'] = ''
+os.environ['https_proxy'] = ''
+
 import json
 import urllib.request
 import math
