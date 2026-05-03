@@ -3,20 +3,11 @@ import json
 import urllib.request
 import math
 import time
+from datetime import datetime, timedelta
 import pandas as pd
+import tushare as ts
 
-# 强制禁用代理 (保险措施)
-os.environ['HTTP_PROXY'] = ''
-os.environ['HTTPS_PROXY'] = ''
-os.environ['http_proxy'] = ''
-os.environ['https_proxy'] = ''
-
-# 猴子补丁：为所有 requests 请求加上伪装 Headers 并禁用代理
-import patch_requests
-
-import akshare as ak
-
-
+# 加载环境变量
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -24,6 +15,15 @@ except ImportError:
     pass
 
 MINIMAX_API_KEY = os.environ.get("MINIMAX_CN_API_KEY")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN")
+
+if not TUSHARE_TOKEN:
+    print("⚠️ 警告: 未在环境变量中找到 TUSHARE_TOKEN，请确保已在 .env 文件中配置！")
+    # 临时退回公共测试Token防崩溃
+    TUSHARE_TOKEN = "7311ce833bf688229b46e379373d4dfbf33d6118d05dd362dbbe7954"
+
+ts.set_token(TUSHARE_TOKEN)
+pro = ts.pro_api()
 
 def ask_minimax(prompt):
     if not MINIMAX_API_KEY:
@@ -48,50 +48,60 @@ def ask_minimax(prompt):
     except Exception as e:
         return f"AI分析失败: {e}"
 
+def get_last_trade_date():
+    """获取最近的一个交易日"""
+    end_date = datetime.now().strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=15)).strftime('%Y%m%d')
+    df_cal = pro.trade_cal(exchange='SSE', is_open='1', start_date=start_date, end_date=end_date)
+    return df_cal['cal_date'].iloc[-1]
+
 def scan_a_shares(limit=3):
-    print("1. 正在连线东方财富，获取全市场 A 股实时行情...")
-    df = ak.stock_zh_a_spot_em()
+    last_date = get_last_trade_date()
+    print(f"1. 正在通过 Tushare 获取全市场 A 股基础信息与行情数据 (交易日: {last_date})...")
     
-    # 过滤掉 ST 股和退市股
-    df = df[~df['名称'].str.contains('ST|退', na=False)]
+    # 获取所有正常上市的股票列表 (名称、代码)
+    df_stock = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
+    # 过滤掉 ST 和退市股
+    df_stock = df_stock[~df_stock['name'].str.contains('ST|退', na=False)]
+    
+    # 获取当天的所有指标 (PE, PB, 收盘价等)
+    df_basic = pro.daily_basic(trade_date=last_date, fields='ts_code,close,pe_ttm,pb')
+    
+    # 将名称与指标合并
+    df = pd.merge(df_stock, df_basic, on='ts_code')
     
     results = []
     print(f"2. 成功获取 {len(df)} 只股票数据。正在执行格雷厄姆内在价值全盘扫描...")
     
     for _, row in df.iterrows():
-        price = row.get('最新价')
-        pe = row.get('市盈率-动态')
-        pb = row.get('市净率')
+        price = row.get('close')
+        pe = row.get('pe_ttm') # 优先使用滚动市盈率，更准确
+        pb = row.get('pb')
         
-        # 数据清洗与校验
-        try:
-            price, pe, pb = float(price), float(pe), float(pb)
-        except:
-            continue
-            
-        # 排除亏损、停牌或异常数据（市盈率/市净率必须大于0，才符合防御性投资）
+        # 排除空数据、亏损企业
         if pd.isna(price) or pd.isna(pe) or pd.isna(pb) or price <= 0 or pe <= 0 or pb <= 0:
             continue
             
+        # 反推指标
         eps = price / pe
         bvps = price / pb
         
         graham_number = math.sqrt(22.5 * eps * bvps)
         
-        # 筛选条件：当前股价必须低于格雷厄姆数字
+        # 筛选条件：当前股价低于格雷厄姆数字
         if price < graham_number:
             margin = (graham_number - price) / graham_number
             results.append({
-                'code': row['代码'],
-                'name': row['名称'],
+                'code': row['ts_code'],
+                'name': row['name'],
                 'price': price,
-                'pe': pe,
-                'pb': pb,
+                'pe': round(pe, 2),
+                'pb': round(pb, 2),
                 'graham': round(graham_number, 2),
-                'margin': round(margin * 100, 2) # 安全边际百分比
+                'margin': round(margin * 100, 2)
             })
             
-    # 按照安全边际降序排序 (越低估的排越前面)
+    # 按照安全边际降序排序
     results.sort(key=lambda x: x['margin'], reverse=True)
     top_stocks = results[:limit]
     
@@ -101,26 +111,26 @@ def scan_a_shares(limit=3):
 
 def generate_daily_report(top_stocks):
     report = "=================================================\n"
-    report += "🤖 【A股全市场扫描】每日深度低估 TOP 榜单\n"
+    report += "🤖 【Tushare全市场扫描】每日深度低估 TOP 榜单\n"
     report += "=================================================\n"
     
     for s in top_stocks:
         print(f"\n正在让 LLM 深度分析 {s['name']}...")
         
-        # 尝试获取公司简介
+        # 获取公司主营业务简介
         summary = "无"
         try:
-            df_profile = ak.stock_profile_cninfo(symbol=s['code'])
-            if not df_profile.empty:
-                summary = str(df_profile['主营业务'].iloc[0])
-        except:
-            pass
+            info_df = pro.stock_company(ts_code=s['code'], fields='main_business')
+            if not info_df.empty and not pd.isna(info_df['main_business'].iloc[0]):
+                summary = str(info_df['main_business'].iloc[0])
+        except Exception as e:
+            print(f"获取 {s['name']} 简介失败: {e}")
             
         prompt = f"""
 你是一个犀利的价值投资分析师。系统在A股5000只股票中，扫描到了严重低于格雷厄姆数字的公司：
 股票：{s['name']}({s['code']})
 当前股价：{s['price']}，理论内在价值：{s['graham']}
-市盈率(PE): {s['pe']}，市净率(PB): {s['pb']}
+市盈率(PE TTM): {s['pe']}，市净率(PB): {s['pb']}
 主营业务：{summary}
 
 极度低估往往意味着市场存在极度悲观的预期（即“价值陷阱”）。
@@ -130,15 +140,13 @@ def generate_daily_report(top_stocks):
         
         report += f"🔥 {s['name']} ({s['code']})\n"
         report += f"   现价: ￥{s['price']} | 格雷厄姆估值: ￥{s['graham']} (安全边际: {s['margin']}%)\n"
-        report += f"   指标: PE = {s['pe']}, PB = {s['pb']}\n"
+        report += f"   指标: PE TTM = {s['pe']}, PB = {s['pb']}\n"
         report += f"   ⚠️ AI 排雷简评: {analysis}\n"
         report += "-"*50 + "\n"
         
     return report
 
 if __name__ == "__main__":
-    # 为了测试速度和节省 Token，我们默认只拿全市场最被低估的前 3 只股票进行 AI 分析
     top_undervalued = scan_a_shares(limit=3)
     final_md = generate_daily_report(top_undervalued)
-    
     print("\n\n" + final_md)
