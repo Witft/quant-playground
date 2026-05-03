@@ -4,6 +4,14 @@ import json
 import urllib.request
 import math
 
+# 尝试加载本地的 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+
 # 1. 配置 MiniMax API
 MINIMAX_API_KEY = os.environ.get("MINIMAX_CN_API_KEY")
 if not MINIMAX_API_KEY:
