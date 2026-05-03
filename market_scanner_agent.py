@@ -4,7 +4,18 @@ import urllib.request
 import math
 import time
 import pandas as pd
+
+# 强制禁用代理 (保险措施)
+os.environ['HTTP_PROXY'] = ''
+os.environ['HTTPS_PROXY'] = ''
+os.environ['http_proxy'] = ''
+os.environ['https_proxy'] = ''
+
+# 猴子补丁：为所有 requests 请求加上伪装 Headers 并禁用代理
+import patch_requests
+
 import akshare as ak
+
 
 try:
     from dotenv import load_dotenv
