@@ -96,6 +96,7 @@ def record_picks(history, picks, trade_date):
                 "trade_date": trade_date,
                 "code": stock["code"],
                 "name": stock["name"],
+                "price": stock.get("price"),
                 "margin": stock["margin"],
                 "recorded_at": datetime.now(TZ).isoformat(timespec="seconds")
             })
