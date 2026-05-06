@@ -8,6 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import pandas as pd
 import tushare as ts
+import psycopg2
 
 # 加载环境变量
 try:
@@ -21,6 +22,95 @@ TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN", "7311ce833bf688229b46e379373d4df
 
 ts.set_token(TUSHARE_TOKEN)
 pro = ts.pro_api()
+
+DB_HOST = "47.97.98.164"
+DB_PORT = 5432
+DB_NAME = "financial_assistant"
+DB_USER = "financial_user"
+DB_PASSWORD = os.getenv("FINANCIAL_PG_PASSWORD") or (os.getenv("DATABASE_URL", "").split(":")[-1].split("@")[0] if os.getenv("DATABASE_URL") else None) or open("/tmp/pg_pass.txt").read().strip()
+
+def get_pg_conn(password=None):
+    p = password or DB_PASSWORD
+    return psycopg2.connect(
+        host=DB_HOST, port=DB_PORT, dbname=DB_NAME,
+        user=DB_USER, password=p
+    )
+
+def init_db():
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS stock_picks (
+                id            SERIAL PRIMARY KEY,
+                trade_date    TEXT NOT NULL,
+                code          TEXT NOT NULL,
+                name          TEXT,
+                price         REAL,
+                pe            REAL,
+                pb            REAL,
+                graham        REAL,
+                margin        REAL,
+                roe           REAL,
+                debt_to_assets REAL,
+                ocfps         REAL,
+                netprofit_yoy REAL,
+                ai_structured_json TEXT,
+                ai_raw_text   TEXT,
+                recorded_at   TEXT NOT NULL DEFAULT NOW(),
+                UNIQUE(trade_date, code)
+            )
+        ''')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_picks_date ON stock_picks(trade_date)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_picks_code ON stock_picks(code)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB_INIT_ERROR] {e}")
+
+def upsert_pick(pick: dict):
+    try:
+        conn = get_pg_conn()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO stock_picks
+                (trade_date, code, name, price, pe, pb, graham, margin,
+                 roe, debt_to_assets, ocfps, netprofit_yoy,
+                 ai_structured_json, ai_raw_text, recorded_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+            ON CONFLICT(trade_date, code) DO UPDATE
+                SET ai_structured_json = EXCLUDED.ai_structured_json,
+                    ai_raw_text       = EXCLUDED.ai_raw_text,
+                    recorded_at       = NOW()
+        ''', (
+            pick["trade_date"], pick["code"], pick["name"], pick["price"],
+            pick["pe"], pick["pb"], pick["graham"], pick["margin"],
+            pick.get("roe"), pick.get("debt_to_assets"),
+            pick.get("ocfps"), pick.get("netprofit_yoy"),
+            pick.get("ai_structured_json"),
+            pick.get("ai_raw_text"),
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[DB_UPSERT_ERROR] {e}")
+
+def parse_structured_response(text: str) -> dict:
+    out = {}
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for sep in [":", "："]:
+            if sep in line:
+                key = line.split(sep, 1)[0].strip()
+                val = line.split(sep, 1)[1].strip()
+                if any(k in key for k in ["裁决", "结论", "最终结论", "最终裁决"]):
+                    out["recommendation"] = val
+                elif "蓝军" in key or "做空" in key:
+                    out["risk_points"] = val
+    return out
+
 
 BASE_DIR = Path(__file__).resolve().parent
 HISTORY_FILE = BASE_DIR / "daily_scanner_history.json"
@@ -223,10 +313,35 @@ def get_last_trade_date():
     end_date = datetime.now().strftime('%Y%m%d')
     start_date = (datetime.now() - timedelta(days=15)).strftime('%Y%m%d')
     df_cal = pro.trade_cal(exchange='SSE', is_open='1', start_date=start_date, end_date=end_date)
-    return df_cal['cal_date'].iloc[-1]
+    return df_cal['cal_date'].iloc[0]
+
+def get_trade_date_with_fallback():
+    """获取最近交易日，如果当天数据不完整则回退到上一个交易日。"""
+    end_date = datetime.now().strftime('%Y%m%d')
+    start_date = (datetime.now() - timedelta(days=15)).strftime('%Y%m%d')
+    df_cal = pro.trade_cal(exchange='SSE', is_open='1', start_date=start_date, end_date=end_date)
+    
+    for _, row in df_cal.iterrows():
+        trade_date = row['cal_date']
+        # 检查该交易日的 daily_basic 数据是否完整
+        try:
+            df_basic = pro.daily_basic(trade_date=trade_date, fields='ts_code,close,pe_ttm,pb')
+            if len(df_basic) > 5000:  # 正常应该有 5000+ 只股票
+                valid_pe = df_basic['pe_ttm'].notna().sum()
+                if valid_pe > 3000:  # 至少 3000+ 只有效 PE 数据
+                    return trade_date
+                else:
+                    print(f"   {trade_date} 数据不完整(有效PE仅{valid_pe}条)，尝试上一个交易日...")
+            else:
+                print(f"   {trade_date} 数据未更新({len(df_basic)}条)，尝试上一个交易日...")
+        except Exception as e:
+            print(f"   {trade_date} 数据获取失败: {e}，尝试上一个交易日...")
+    
+    # 如果都失败了，返回最近一个交易日作为保底
+    return df_cal['cal_date'].iloc[0]
 
 def scan_a_shares(limit=DAILY_PICK_COUNT, candidate_pool_size=CANDIDATE_POOL_SIZE):
-    last_date = get_last_trade_date()
+    last_date = get_trade_date_with_fallback()
     print(f"1. 正在获取全市场 A 股基础行情 (交易日: {last_date})...")
     
     df_stock = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name')
@@ -301,6 +416,12 @@ def scan_a_shares(limit=DAILY_PICK_COUNT, candidate_pool_size=CANDIDATE_POOL_SIZ
             
     print(f"   过滤完成，获得 {len(candidate_pool)} 只基本面合格标的。")
 
+    if len(candidate_pool) == 0:
+        print("   ⚠️ 警告: 基本面排雷后无合格标的，可能原因：")
+        print("      1. 当前市场估值整体偏高，无格雷厄姆安全边际股票")
+        print("      2. 财报季财务数据暂时缺失（季报/年报更新中）")
+        print("      3. 数据源更新延迟，建议检查 Tushare 数据完整性")
+
     history = load_history()
     recent_codes = recent_analyzed_codes(history, last_date)
     fresh_picks = [s for s in candidate_pool if s['code'] not in recent_codes]
@@ -333,7 +454,7 @@ def generate_daily_report():
     if top_stocks:
         report += "\n## 一、格雷厄姆低估值扫描\n"
     else:
-        report += "\n## 一、格雷厄姆低估值扫描\n今日无满足安全边际的 A 股标的。\n"
+        report += "\n## 一、格雷厄姆低估值扫描\n今日无满足安全边际的 A 股标的。\n\n> **原因分析：**\n> - 若为非交易日：Tushare 数据尚未更新，已自动回退到最近交易日。\n> - 若为交易日：当前市场估值整体偏高，或财报季财务数据暂时缺失，导致无股票通过格雷厄姆安全边际筛选。\n> - 建议：关注观察池中的主题股，或等待市场回调机会。\n"
 
     for s in top_stocks:
         print(f"\n正在召开针对 {s['name']} 的 AI 董事会会议...")
@@ -360,6 +481,29 @@ def generate_daily_report():
 4. ⚖️ 【最终裁决】：(坚决回避 / 放入观察池 / 具备安全边际可买入)
 """
         analysis = ask_minimax(prompt)
+        
+        try:
+            structured = parse_structured_response(analysis)
+            ai_json = json.dumps(structured, ensure_ascii=False) if structured else None
+            pick_db = {
+                "trade_date": trade_date,
+                "code": s["code"],
+                "name": s["name"],
+                "price": s["price"],
+                "pe": s.get("pe"),
+                "pb": s.get("pb"),
+                "graham": s.get("graham"),
+                "margin": s.get("margin"),
+                "roe": s.get("roe"),
+                "debt_to_assets": s.get("debt_to_assets"),
+                "ocfps": s.get("ocfps"),
+                "netprofit_yoy": s.get("netprofit_yoy"),
+                "ai_structured_json": ai_json,
+                "ai_raw_text": analysis,
+            }
+            upsert_pick(pick_db)
+        except Exception as e:
+            print(f"[DB_ERROR] {e}")
         
         report += f"🔥 标的：{s['name']} ({s['code']})\n"
         report += f"   数据：现价 ￥{s['price']} | 理论估值 ￥{s['graham']} | PE {s['pe']} | PB {s['pb']}\n"
