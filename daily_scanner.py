@@ -72,6 +72,15 @@ def upsert_pick(pick: dict):
     try:
         conn = get_pg_conn()
         cur = conn.cursor()
+        
+        # 将 numpy 类型转换为 Python 原生类型，避免 PostgreSQL 驱动报错
+        def to_native(val):
+            if val is None:
+                return None
+            if hasattr(val, 'item'):  # numpy scalar
+                return val.item()
+            return val
+        
         cur.execute('''
             INSERT INTO stock_picks
                 (trade_date, code, name, price, pe, pb, graham, margin,
@@ -83,10 +92,12 @@ def upsert_pick(pick: dict):
                     ai_raw_text       = EXCLUDED.ai_raw_text,
                     recorded_at       = NOW()
         ''', (
-            pick["trade_date"], pick["code"], pick["name"], pick["price"],
-            pick["pe"], pick["pb"], pick["graham"], pick["margin"],
-            pick.get("roe"), pick.get("debt_to_assets"),
-            pick.get("ocfps"), pick.get("netprofit_yoy"),
+            pick["trade_date"], pick["code"], pick["name"], 
+            to_native(pick["price"]), to_native(pick["pe"]), 
+            to_native(pick["pb"]), to_native(pick["graham"]), 
+            to_native(pick["margin"]),
+            to_native(pick.get("roe")), to_native(pick.get("debt_to_assets")),
+            to_native(pick.get("ocfps")), to_native(pick.get("netprofit_yoy")),
             pick.get("ai_structured_json"),
             pick.get("ai_raw_text"),
         ))
